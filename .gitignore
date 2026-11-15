@@ -3,3 +3,6 @@
 *.ppm
 *.mp4
 progvid
+
+# Fonts from the USA Graphics Company are (probably?) not redistributable?
+fonts/

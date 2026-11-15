@@ -21,6 +21,8 @@
 #define COMMON_IMPLEMENTATION
 #include "common.h"
 
+#define STB_RECT_PACK_IMPLEMENTATION
+#include "stb_rect_pack.h"
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
 
@@ -28,6 +30,8 @@
 #define VIDEO_RESOLUTION_H     480
 #define CHARACTER_W              9
 #define CHARACTER_H             16
+#define TICKS_PER_CHARACTER      4
+#define DEFAULT_FONT           "./"
 
 #define USAGE "%s <source files>\n"
 
@@ -59,20 +63,31 @@ char *KEYWORDS_ORG[] = {
     "if", "for", "do", "while", "return", "switch", "case", "goto"
 };
 
-typedef struct FontTexture {
-} FontTexture;
-
-typedef struct PPMPixel {
+typedef struct Pixel {
     u8 r;
     u8 g;
     u8 b;
-} PPMPixel;
+} Pixel;
 
 typedef struct Image {
     u32 width;
     u32 height;
-    PPMPixel *pixels;
+    Pixel *pixels;
 } Image;
+
+typedef struct FilePlayback {
+    FILE *fp;
+    size_t file_size;
+    u32 rows;
+    u32 cols;
+    u64 tick;
+} FilePlayback;
+
+typedef struct Font {
+    u32 width;
+    u32 height;
+    u8 *pixels;
+} Font;
 
 // CreateImage: creates an image
 Image *CreateImage(u32 width, u32 height);
@@ -83,6 +98,12 @@ void DestroyImage(Image *image);
 // WriteImageToSTDOUT: writes the image as-is to STDOUT
 void WriteImageToSTDOUT(Image *image);
 
+// IsFilePlaybackDone: returns true if the file playback is done
+int IsFilePlaybackDone(FilePlayback *pb);
+
+// ProcessPlayback: runs a single 'tick' of playback (loosely assumed output is 60fps)
+void ProcessPlayback(FilePlayback *pb, Image *img);
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -91,18 +112,57 @@ int main(int argc, char **argv)
     }
 
     Image *img = CreateImage(VIDEO_RESOLUTION_W, VIDEO_RESOLUTION_H);
-    for (i32 i = 0; i < 6000; i++) {
-        WriteImageToSTDOUT(img);
+
+    for (i32 i = 1; i < argc; i++) {
+        // TODO We should check if the files exist before we even get here.
+        FILE *fp = fopen(argv[i], "rb");
+        if (fp == NULL) {
+            fprintf(stderr, "SKIPPING %s - doesn't exist?\n", argv[i]);
+            continue;
+        }
+
+        fseek(fp, 0, SEEK_END);
+        size_t file_size = ftell(fp);
+        rewind(fp);
+
+        FilePlayback pb = {
+            .fp = fp,
+            .file_size = file_size,
+            .rows = 0,
+            .cols = 0,
+            .tick = 0
+        };
+
+        while (!IsFilePlaybackDone(&pb)) {
+            ProcessPlayback(&pb, img);
+            WriteImageToSTDOUT(img);
+        }
+
+        fclose(fp);
     }
+
     DestroyImage(img);
+}
+
+int IsFilePlaybackDone(FilePlayback *pb)
+{
+    return pb->tick >= pb->file_size * TICKS_PER_CHARACTER;
+}
+
+void ProcessPlayback(FilePlayback *pb, Image *img)
+{
+    if (!(pb->tick > 0 && pb->tick++ % TICKS_PER_CHARACTER == 0)) {
+        return;
+    }
 }
 
 void WriteImageToSTDOUT(Image *image)
 {
     printf("P6\n%d %d\n255\n", image->width, image->height);
+
     size_t written = fwrite(
         image->pixels,
-        sizeof(PPMPixel),
+        sizeof(Pixel),
         (image->width * image->height),
         stdout
     );
@@ -112,13 +172,13 @@ void WriteImageToSTDOUT(Image *image)
 
 Image *CreateImage(u32 width, u32 height)
 {
-    size_t size = sizeof(Image) + (sizeof(PPMPixel) * width * height);
+    size_t size = sizeof(Image) + (sizeof(Pixel) * width * height);
     Image *img = calloc(1, size);
     assert(img != NULL);
 
     img->width  = width;
     img->height = height;
-    img->pixels = (PPMPixel *)(((u8 *)img) + sizeof(*img));
+    img->pixels = (Pixel *)(((u8 *)img) + sizeof(*img));
 
     return img;
 }
@@ -126,4 +186,33 @@ Image *CreateImage(u32 width, u32 height)
 void DestroyImage(Image *image)
 {
     free(image);
+}
+
+Font *CreateFont(char *path)
+{
+}
+
+void DestroyFont(Font *font)
+{
+    free(font);
+}
+
+char *ReadFile(char *path)
+{
+    FILE *fp = fopen(path, "rb");
+    if (fp == NULL) {
+        return NULL;
+    }
+
+    fseek(fp, 0, SEEK_END);
+    i64 size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    char *bytes = calloc(1, size + 1);
+
+    fread(bytes, 1, size, fp);
+
+    fclose(fp);
+
+    return bytes;
 }
