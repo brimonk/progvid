@@ -2,6 +2,8 @@
 *.o
 *.ppm
 *.mp4
+.gdb_history
+tags
 progvid
 
 # Fonts from the USA Graphics Company are (probably?) not redistributable?
