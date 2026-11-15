@@ -91,11 +91,9 @@ int main(int argc, char **argv)
     }
 
     Image *img = CreateImage(VIDEO_RESOLUTION_W, VIDEO_RESOLUTION_H);
-
-    for (i32 i = 1; i < argc; i++) {
+    for (i32 i = 0; i < 6000; i++) {
         WriteImageToSTDOUT(img);
     }
-
     DestroyImage(img);
 }
 
