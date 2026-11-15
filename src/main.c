@@ -31,11 +31,15 @@
 #define CHARACTER_W              9
 #define CHARACTER_H             16
 #define TICKS_PER_CHARACTER      2
+#define TAB_WIDTH                4
 #define DEFAULT_FONT           "./fonts/TX-02-JMJPQ031/BerkeleyMono-Regular.ttf"
 #define FALLBACK_FONT          "/usr/share/fonts/truetype/freefont/FreeMono.ttf"
 
 #define FONT_ATLAS_PIXELS_W   2048
 #define FONT_ATLAS_PIXELS_H   2048
+
+#define TEXT_COLS (VIDEO_RESOLUTION_W / CHARACTER_W)
+#define TEXT_ROWS (VIDEO_RESOLUTION_H / CHARACTER_H)
 
 #define USAGE "%s <source files>\n"
 
@@ -76,6 +80,7 @@ typedef struct Pixel {
 typedef struct Image {
     u32 width;
     u32 height;
+    u32 pitch;
     Pixel *pixels;
 } Image;
 
@@ -90,6 +95,7 @@ typedef struct FilePlayback {
 typedef struct Font {
     u32 width;
     u32 height;
+    u32 pitch;
     u8 *pixels;
     void *chars;
     f32 pixel_height;
@@ -127,6 +133,9 @@ void DestroyFont();
 // WriteImageToSTDOUT: writes the image as-is to STDOUT
 void WriteImageToSTDOUT(Image *image);
 
+// ClearImage: clears the image
+void ClearImage(Image *img);
+
 // IsFilePlaybackDone: returns true if the file playback is done
 int IsFilePlaybackDone(FilePlayback *pb);
 
@@ -163,6 +172,8 @@ int main(int argc, char **argv)
             .tick = 0
         };
 
+        ClearImage(img);
+
         while (!IsFilePlaybackDone(&pb)) {
             ProcessPlayback(&pb, img, font);
             WriteImageToSTDOUT(img);
@@ -182,20 +193,20 @@ int IsFilePlaybackDone(FilePlayback *pb)
 
 void BlitBlendMod(Image *img, Font *font, Rect dst, Rect src, Pixel colormod)
 {
-    i32 w = s.w;
-    i32 h = s.h;
+    i32 w = src.w;
+    i32 h = src.h;
 
     // Clip against the left/top of 'dst', shifting 'src' to match.
-    if (dst.x < 0) { s.x -= d.x; w += d.x; d.x = 0; }
-    if (dst.y < 0) { s.y -= d.y; h += d.y; d.y = 0; }
+    if (dst.x < 0) { src.x -= dst.x; w += dst.x; dst.x = 0; }
+    if (dst.y < 0) { src.y -= dst.y; h += dst.y; dst.y = 0; }
 
     // Clip against the left/top of 'src'.
-    if (src.x < 0) { d.x -= s.x; w + s.x; s.x = 0; }
-    if (src.y < 0) { d.y -= s.y; h + s.y; s.y = 0; }
+    if (src.x < 0) { dst.x -= src.x; w += src.x; src.x = 0; }
+    if (src.y < 0) { dst.y -= src.y; h += src.y; src.y = 0; }
 
     // Clip against the right/bottom of both.
-    if (dst.x + w > img->width)  w = img->width - dst.x;
-    if (dst.y + h > img->height) h = img->height - dst.y;
+    if (dst.x + w > (i32)img->width)  w = (i32)img->width  - dst.x;
+    if (dst.y + h > (i32)img->height) h = (i32)img->height - dst.y;
 
     if (src.x + w > font->atlas_w) w = font->atlas_w - src.x;
     if (src.y + h > font->atlas_h) h = font->atlas_h - src.y;
@@ -209,40 +220,64 @@ void BlitBlendMod(Image *img, Font *font, Rect dst, Rect src, Pixel colormod)
         u8 *sp    = font->pixels + (src.y + row) * font->pitch + src.x;
 
         for (i32 i = 0; i < w; i++) {
-            // FINISH ME - THANKS
+            u32 a = sp[i];      // glyph coverage
+
+            if (a == 0) {
+                continue;
+            }
+
+            if (a == 255) {
+                dp[i].r = colormod.r;
+                dp[i].g = colormod.g;
+                dp[i].b = colormod.b;
+                continue;
+            }
+
+            u32 ia = 255 - a;
+
+            // Rounded "over" blend: (src * a + dst * (255 - a)) / 255
+            dp[i].r = (u8)((colormod.r * a + dp[i].r * ia + 127) / 255);
+            dp[i].g = (u8)((colormod.g * a + dp[i].g * ia + 127) / 255);
+            dp[i].b = (u8)((colormod.b * a + dp[i].b * ia + 127) / 255);
         }
     }
 }
 
-void WriteCHARToImage(Image *img, Font *font, u32 codepoint, u32 x, u32 y, u32 color)
+void ScrollImageUp(Image *img, u32 pixels)
 {
-    // TEMPORARY all characters are white
+    if (pixels >= img->height) {
+        ClearImage(img);
+        return;
+    }
 
-    f32 fx = x;
-    f32 fy = y;
+    size_t keep = (size_t)(img->height - pixels) * img->pitch;
 
+    memmove(img->pixels, img->pixels + (size_t)pixels * img->pitch, keep * sizeof(Pixel));
+    memset(img->pixels + keep, 0, (size_t)pixels * img->pitch * sizeof(Pixel));
+}
+
+void WriteCHARToImage(Image *img, Font *font, u32 codepoint, u32 row, u32 col, u32 color)
+{
     Pixel colormod = {
         .r = (color & 0xff),
         .g = ((color >>  8) & 0xff),
         .b = ((color >> 16) & 0xff),
     };
 
-    assert(font->first_char <= codepoint && codepoint < font->first_char + font->num_chars);
+    if ((i32)codepoint < font->first_char || (i32)codepoint >= font->first_char + font->num_chars) {
+        codepoint = '?';
+    }
 
-    stbtt_aligned_quad q;
+    stbtt_packedchar *pc = &((stbtt_packedchar *)font->chars)[codepoint - font->first_char];
 
-    stbtt_GetPackedQuad(font->chars, font->atlas_w, font->atlas_h, codepoint - font->first_char, &fx, &fy, &q, 1);
+    Rect src = { pc->x0, pc->y0, pc->x1 - pc->x0, pc->y1 - pc->y0 };
 
-    Rect src = {
-        (i32)roundf(q.s0 * font->atlas_w),
-        (i32)roundf(q.t0 * font->atlas_h),
-        (i32)roundf((q.s1 - q.s0) * font->atlas_w),
-        (i32)roundf((q.t1 - q.t0) * font->atlas_h)
-    };
+    f32 pen_x = (f32)(col * CHARACTER_W);
+    f32 pen_y = (f32)(row * CHARACTER_H) + roundf(font->ascent);   // baseline
 
     Rect dst = {
-        (i32)roundf(q.x0),
-        (i32)roundf(q.y0),
+        (i32)floorf(pen_x + pc->xoff + 0.5f),
+        (i32)floorf(pen_y + pc->yoff + 0.5f),
         src.w,
         src.h,
     };
@@ -261,6 +296,7 @@ void ProcessPlayback(FilePlayback *pb, Image *img, Font *font)
         return;
     }
 
+SPEED_THROUGH_SPACES:
     // We're just going to write one character at a time to the output.
     u32 codepoint = fgetc(pb->fp);
 
@@ -273,15 +309,44 @@ void ProcessPlayback(FilePlayback *pb, Image *img, Font *font)
             break;
         }
 
+        case ' ': {
+            pb->col++;
+            pb->tick++;
+            goto SPEED_THROUGH_SPACES;
+            break;
+        }
+
         case '\r': { // UNIX HANDLING
             pb->col = 0;
             break;
         }
 
-        default: {
-            WriteCHARToImage(img, font, codepoint, pb->col, pb->row);
+        case '\t': {
+            pb->col += TAB_WIDTH - (pb->col % TAB_WIDTH);
             break;
         }
+
+        default: {
+            if (pb->col >= TEXT_COLS) { // wrap
+                pb->col = 0;
+                pb->row++;
+            }
+
+            if (pb->row >= TEXT_ROWS) {
+                ScrollImageUp(img, CHARACTER_H);
+                pb->row = TEXT_ROWS - 1;
+            }
+
+            WriteCHARToImage(img, font, codepoint, pb->row, pb->col, 0xffffff);
+            pb->col++;
+
+            break;
+        }
+    }
+
+    if (pb->row >= TEXT_ROWS) {
+        ScrollImageUp(img, CHARACTER_H * (pb->row - (TEXT_ROWS - 1)));
+        pb->row = TEXT_ROWS - 1;
     }
 
     pb->tick++;
@@ -301,6 +366,11 @@ void WriteImageToSTDOUT(Image *image)
     assert(written == (image->width * image->height));
 }
 
+void ClearImage(Image *img)
+{
+    memset(img->pixels, 0, img->width * img->height * sizeof(*img->pixels));
+}
+
 Image *CreateImage(u32 width, u32 height)
 {
     size_t size = sizeof(Image) + (sizeof(Pixel) * width * height);
@@ -309,6 +379,7 @@ Image *CreateImage(u32 width, u32 height)
 
     img->width  = width;
     img->height = height;
+    img->pitch  = width;
     img->pixels = (Pixel *)(((u8 *)img) + sizeof(*img));
 
     return img;
@@ -341,6 +412,9 @@ Font *CreateFont()
 
     font->atlas_w = FONT_ATLAS_PIXELS_W;
     font->atlas_h = FONT_ATLAS_PIXELS_H;
+    font->width   = font->atlas_w;
+    font->height  = font->atlas_h;
+    font->pitch   = font->atlas_w;
 
     // NOTE ASCII is from 32 .. 126. If we ever want UTF-8 characters, we'll need to do something
     // interesting, where we have dynamically rendering font atlas stuff??
@@ -350,19 +424,19 @@ Font *CreateFont()
     // TBD.
 
     font->pixel_height = CHARACTER_H;
-    font->first_char = '0';
-    font->num_chars = '~' - '0';
+    font->first_char = ' ';
+    font->num_chars = '~' - ' ' + 1;
 
     font->chars = calloc(font->num_chars, sizeof(stbtt_packedchar));
     assert(font->chars);
 
-    u8 *alpha = calloc(font->atlas_w * font->atlas_h, sizeof(*alpha));
-    assert(alpha);
+    font->pixels = calloc(font->atlas_w * font->atlas_h, sizeof(*font->pixels));
+    assert(font->pixels);
 
     stbtt_pack_context pc;
 
-    stbtt_PackBegin(&pc, alpha, font->atlas_w, font->atlas_h, 0, 1, NULL);
-    stbtt_PackSetOversampling(&pc, 2, 2);
+    stbtt_PackBegin(&pc, font->pixels, font->atlas_w, font->atlas_h, 0, 1, NULL);
+    // stbtt_PackSetOversampling(&pc, 2, 2);
     i32 ok = stbtt_PackFontRange(&pc, ttf, 0, font->pixel_height, font->first_char, font->num_chars, font->chars);
     stbtt_PackEnd(&pc);
 
