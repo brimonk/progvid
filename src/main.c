@@ -30,8 +30,12 @@
 #define VIDEO_RESOLUTION_H     480
 #define CHARACTER_W              9
 #define CHARACTER_H             16
-#define TICKS_PER_CHARACTER      4
-#define DEFAULT_FONT           "./"
+#define TICKS_PER_CHARACTER      2
+#define DEFAULT_FONT           "./fonts/TX-02-JMJPQ031/BerkeleyMono-Regular.ttf"
+#define FALLBACK_FONT          "/usr/share/fonts/truetype/freefont/FreeMono.ttf"
+
+#define FONT_ATLAS_PIXELS_W   2048
+#define FONT_ATLAS_PIXELS_H   2048
 
 #define USAGE "%s <source files>\n"
 
@@ -78,8 +82,8 @@ typedef struct Image {
 typedef struct FilePlayback {
     FILE *fp;
     size_t file_size;
-    u32 rows;
-    u32 cols;
+    u32 row;
+    u32 col;
     u64 tick;
 } FilePlayback;
 
@@ -87,13 +91,38 @@ typedef struct Font {
     u32 width;
     u32 height;
     u8 *pixels;
+    void *chars;
+    f32 pixel_height;
+    i32 atlas_w;
+    i32 atlas_h;
+    i32 first_char;
+    i32 num_chars;
+    f32 ascent;
+    f32 descent;
+    f32 line_gap;
 } Font;
+
+typedef struct Rect {
+    i32 x;
+    i32 y;
+    i32 w;
+    i32 h;
+} Rect;
+
+// ReadFile: just reads a file using stdlib
+char *ReadFile(char *path);
 
 // CreateImage: creates an image
 Image *CreateImage(u32 width, u32 height);
 
 // DestroyImage: destroys an image
 void DestroyImage(Image *image);
+
+// CreateFont: loads a font, packs it into our atlas, and prepares for rendering to video
+Font *CreateFont();
+
+// DestroyFont: destroys the font object
+void DestroyFont();
 
 // WriteImageToSTDOUT: writes the image as-is to STDOUT
 void WriteImageToSTDOUT(Image *image);
@@ -102,7 +131,7 @@ void WriteImageToSTDOUT(Image *image);
 int IsFilePlaybackDone(FilePlayback *pb);
 
 // ProcessPlayback: runs a single 'tick' of playback (loosely assumed output is 60fps)
-void ProcessPlayback(FilePlayback *pb, Image *img);
+void ProcessPlayback(FilePlayback *pb, Image *img, Font *font);
 
 int main(int argc, char **argv)
 {
@@ -111,6 +140,7 @@ int main(int argc, char **argv)
         exit(1);
     }
 
+    Font *font = CreateFont();
     Image *img = CreateImage(VIDEO_RESOLUTION_W, VIDEO_RESOLUTION_H);
 
     for (i32 i = 1; i < argc; i++) {
@@ -128,13 +158,13 @@ int main(int argc, char **argv)
         FilePlayback pb = {
             .fp = fp,
             .file_size = file_size,
-            .rows = 0,
-            .cols = 0,
+            .row  = 0,
+            .col  = 0,
             .tick = 0
         };
 
         while (!IsFilePlaybackDone(&pb)) {
-            ProcessPlayback(&pb, img);
+            ProcessPlayback(&pb, img, font);
             WriteImageToSTDOUT(img);
         }
 
@@ -142,6 +172,7 @@ int main(int argc, char **argv)
     }
 
     DestroyImage(img);
+    DestroyFont(font);
 }
 
 int IsFilePlaybackDone(FilePlayback *pb)
@@ -149,11 +180,111 @@ int IsFilePlaybackDone(FilePlayback *pb)
     return pb->tick >= pb->file_size * TICKS_PER_CHARACTER;
 }
 
-void ProcessPlayback(FilePlayback *pb, Image *img)
+void BlitBlendMod(Image *img, Font *font, Rect dst, Rect src, Pixel colormod)
 {
-    if (!(pb->tick > 0 && pb->tick++ % TICKS_PER_CHARACTER == 0)) {
+    i32 w = s.w;
+    i32 h = s.h;
+
+    // Clip against the left/top of 'dst', shifting 'src' to match.
+    if (dst.x < 0) { s.x -= d.x; w += d.x; d.x = 0; }
+    if (dst.y < 0) { s.y -= d.y; h += d.y; d.y = 0; }
+
+    // Clip against the left/top of 'src'.
+    if (src.x < 0) { d.x -= s.x; w + s.x; s.x = 0; }
+    if (src.y < 0) { d.y -= s.y; h + s.y; s.y = 0; }
+
+    // Clip against the right/bottom of both.
+    if (dst.x + w > img->width)  w = img->width - dst.x;
+    if (dst.y + h > img->height) h = img->height - dst.y;
+
+    if (src.x + w > font->atlas_w) w = font->atlas_w - src.x;
+    if (src.y + h > font->atlas_h) h = font->atlas_h - src.y;
+
+    if (w <= 0 || h <= 0) {
         return;
     }
+
+    for (i32 row = 0; row < h; row++) {
+        Pixel *dp = img->pixels  + (dst.y + row) * img->pitch  + dst.x;
+        u8 *sp    = font->pixels + (src.y + row) * font->pitch + src.x;
+
+        for (i32 i = 0; i < w; i++) {
+            // FINISH ME - THANKS
+        }
+    }
+}
+
+void WriteCHARToImage(Image *img, Font *font, u32 codepoint, u32 x, u32 y, u32 color)
+{
+    // TEMPORARY all characters are white
+
+    f32 fx = x;
+    f32 fy = y;
+
+    Pixel colormod = {
+        .r = (color & 0xff),
+        .g = ((color >>  8) & 0xff),
+        .b = ((color >> 16) & 0xff),
+    };
+
+    assert(font->first_char <= codepoint && codepoint < font->first_char + font->num_chars);
+
+    stbtt_aligned_quad q;
+
+    stbtt_GetPackedQuad(font->chars, font->atlas_w, font->atlas_h, codepoint - font->first_char, &fx, &fy, &q, 1);
+
+    Rect src = {
+        (i32)roundf(q.s0 * font->atlas_w),
+        (i32)roundf(q.t0 * font->atlas_h),
+        (i32)roundf((q.s1 - q.s0) * font->atlas_w),
+        (i32)roundf((q.t1 - q.t0) * font->atlas_h)
+    };
+
+    Rect dst = {
+        (i32)roundf(q.x0),
+        (i32)roundf(q.y0),
+        src.w,
+        src.h,
+    };
+
+    BlitBlendMod(img, font, dst, src, colormod);
+}
+
+void ProcessPlayback(FilePlayback *pb, Image *img, Font *font)
+{
+    assert(pb);
+    assert(img);
+    assert(font);
+
+    if (pb->tick == 0 || pb->tick % TICKS_PER_CHARACTER != 0) {
+        pb->tick++;
+        return;
+    }
+
+    // We're just going to write one character at a time to the output.
+    u32 codepoint = fgetc(pb->fp);
+
+    // TODO HANDLE ALL CONTROL CHARACTERS THAT MIGHT BE IN THE FILE
+
+    switch (codepoint) {
+        case '\n': {
+            pb->col = 0;
+            pb->row++;
+            break;
+        }
+
+        case '\r': { // UNIX HANDLING
+            pb->col = 0;
+            break;
+        }
+
+        default: {
+            WriteCHARToImage(img, font, codepoint, pb->col, pb->row);
+            break;
+        }
+    }
+
+    pb->tick++;
 }
 
 void WriteImageToSTDOUT(Image *image)
@@ -188,12 +319,81 @@ void DestroyImage(Image *image)
     free(image);
 }
 
-Font *CreateFont(char *path)
+Font *CreateFont()
 {
+    char *font_path = NULL;
+
+    autofree u8 *ttf = (u8 *)ReadFile(DEFAULT_FONT);
+    if (ttf == NULL) {
+        ttf = (u8 *)ReadFile(FALLBACK_FONT);
+        if (ttf == NULL) {
+            fprintf(stderr, "No fonts available (default and fallback) - BAILING\n");
+            exit(1);
+        } else {
+            font_path = FALLBACK_FONT;
+        }
+    } else {
+        font_path = DEFAULT_FONT;
+    }
+
+    Font *font = calloc(1, sizeof(*font));
+    assert(font);
+
+    font->atlas_w = FONT_ATLAS_PIXELS_W;
+    font->atlas_h = FONT_ATLAS_PIXELS_H;
+
+    // NOTE ASCII is from 32 .. 126. If we ever want UTF-8 characters, we'll need to do something
+    // interesting, where we have dynamically rendering font atlas stuff??
+    // 
+    // Dunno.
+    //
+    // TBD.
+
+    font->pixel_height = CHARACTER_H;
+    font->first_char = '0';
+    font->num_chars = '~' - '0';
+
+    font->chars = calloc(font->num_chars, sizeof(stbtt_packedchar));
+    assert(font->chars);
+
+    u8 *alpha = calloc(font->atlas_w * font->atlas_h, sizeof(*alpha));
+    assert(alpha);
+
+    stbtt_pack_context pc;
+
+    stbtt_PackBegin(&pc, alpha, font->atlas_w, font->atlas_h, 0, 1, NULL);
+    stbtt_PackSetOversampling(&pc, 2, 2);
+    i32 ok = stbtt_PackFontRange(&pc, ttf, 0, font->pixel_height, font->first_char, font->num_chars, font->chars);
+    stbtt_PackEnd(&pc);
+
+    if (!ok) {
+        fprintf(stderr, "Failed to load our font atlas at current sizes for '%s'. Increase limits!\n", font_path);
+        exit(1);
+    }
+
+    stbtt_fontinfo info;
+    stbtt_InitFont(&info, ttf, stbtt_GetFontOffsetForIndex(ttf, 0));
+    f32 scale = stbtt_ScaleForPixelHeight(&info, font->pixel_height);
+
+    i32 a, d, g;
+
+    stbtt_GetFontVMetrics(&info, &a, &d, &g);
+
+    font->ascent = a * scale;
+    font->descent = d * scale;
+    font->line_gap = g * scale;
+
+    return font;
 }
 
 void DestroyFont(Font *font)
 {
+    assert(font);
+    assert(font->pixels);
+    assert(font->chars);
+
+    free(font->pixels);
+    free(font->chars);
     free(font);
 }
 
